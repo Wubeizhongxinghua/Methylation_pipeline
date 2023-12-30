@@ -1,0 +1,157 @@
+### This pipeline, writen by Li Mingyang, is used for processing BS-seq data (only for BS-seq, instead of RRBS, targeted, amplicon, etc.).
+
+# Before running it, please re-check whether you have downloaded all the data you want to process, and turned the .sralite format into .fasta/.fastq format.
+
+## Softwares' version information
+# trim_galore 0.6.6
+# bismark v0.22.3
+# samtools 1.10
+# R 4.1.1
+
+
+###### Required dirs ######
+# ./sample_id -- store all the sample name information corresponding to file names of .fq.gz
+# ./lambda -- lambda genome
+# ./output -- output file
+# ./data -- data dir with directory named {dataset} and .fq.gz files in it.
+# ./tools
+#   picard.jar
+#   methyldackel.sh
+#   cal_coverd_genome.py
+
+
+## Config information.
+genome_dir = "/lustre3/chengqiyi_pkuhpc/folder_for_learning/hg38" #including reference genome and index files for bwameth
+lamda_dir = "/lustre3/chengqiyi_pkuhpc/folder_for_learning/limingyang/lambda"
+dataset = "T16_check" # dataset name
+sample_ids = open(f"sample_id/{dataset}.txt").read().strip().split("\n") # sample names
+
+
+
+# Now, we shall begin.
+rule all:
+	input:
+		trim1 = expand("output/{dataset}/trim/{sample_id}_1_val_1.fq.gz",dataset=dataset,sample_id=sample_ids),
+		trim2 = expand("output/{dataset}/trim/{sample_id}_2_val_2.fq.gz",dataset=dataset,sample_id=sample_ids),
+		fastqc1 = expand("output/{dataset}/trim/{sample_id}_1_val_1_fastqc.html",dataset=dataset,sample_id=sample_ids),
+		fastqc2 = expand("output/{dataset}/trim/{sample_id}_2_val_2_fastqc.html",dataset=dataset,sample_id=sample_ids),
+		bwameth = expand("output/{dataset}/bwameth_results/{sample_id}.bam",dataset=dataset,sample_id=sample_ids),
+		rmduplication = expand("output/{dataset}/bwameth_results/bam_rmdup/{sample_id}.deduplicated.bam",dataset=dataset,sample_id=sample_ids),
+		bam_idx = expand("output/{dataset}/bwameth_results/bam_rmdup/{sample_id}.deduplicated.bam.bai", dataset=dataset, sample_id = sample_ids),
+		bam_lambda = expand("output/{dataset}/bismark_results_lamda/{sample_id}.bam", dataset = dataset, sample_id = sample_ids),
+		bedgraph = expand("output/{dataset}/bwameth_results/bam_rmdup/{sample_id}_CpG.bedGraph",dataset=dataset, sample_id = sample_ids)
+
+# trim fastq files
+rule trim_galore:
+	input:
+		fastq1 = "data/{dataset}/{sample_id}_1.fq.gz",
+		fastq2 = "data/{dataset}/{sample_id}_2.fq.gz"
+	output:
+		fastq1 = "output/{dataset}/trim/{sample_id}_1_val_1.fq.gz",
+		fastq2 = "output/{dataset}/trim/{sample_id}_2_val_2.fq.gz"
+	threads: 20
+	shell:
+		"""
+		trim_galore -j 20 -q 30 --phred33 --length 35 --stringency 3 --paired -o output/{wildcards.dataset}/trim/ {input.fastq1} {input.fastq2}
+		"""
+# todo: add multiqc function?
+rule fastqc:
+	input:
+		fastq1 = "output/{dataset}/trim/{sample_id}_1_val_1.fq.gz",
+		fastq2 = "output/{dataset}/trim/{sample_id}_2_val_2.fq.gz"
+	output:
+		report1 = "output/{dataset}/trim/{sample_id}_1_val_1_fastqc.html",
+		report2 = "output/{dataset}/trim/{sample_id}_2_val_2_fastqc.html"
+	threads: 20
+	shell:
+		"""
+		fastqc -o output/{dataset}/trim/ -t {threads} {input.fastq1} {input.fastq2}
+		"""
+# alignment with bwameth, you need to check whether your toolshed package has been installed.
+rule bwameth:
+	input:
+		genome = expand("{genome}",genome=genome_dir),
+		fastq1 = "output/{dataset}/trim/{sample_id}_1_val_1.fq.gz",
+		fastq2 = "output/{dataset}/trim/{sample_id}_2_val_2.fq.gz"
+	output:
+		bam = "output/{dataset}/bwameth_results/{sample_id}.bam"
+	log:
+		"output/{dataset}/log/bwameth_results/{sample_id}.log"
+	threads: 20
+	shell:
+		"""
+		bwameth.py --reference {input.genome}/hg38_only_chromsomes.fa -t {threads} {input.fastq1} {input.fastq2} 2> {log} | samtools view -b -o {output.bam}
+		"""
+
+# rmduplicate using picard.jar
+rule rmduplicate:
+	input:
+		bam = "output/{dataset}/bwameth_results/{sample_id}.bam"
+	output:
+		bam = "output/{dataset}/bwameth_results/bam_rmdup/{sample_id}.deduplicated.bam"
+	log:
+		"output/{dataset}/log/bwameth_results/bam_rmdup/{sample_id}.log"
+	threads: 20
+	shell:
+		"""
+        java -jar tools/picard.jar MarkDuplicates -I {input.bam} -O {output.bam} -REMOVE_DUPLICATES true -METRICS_FILE output/{wildcards.dataset}/bwameth_results/bam_rmdup/{wildcards.sample_id}_rmdup.txt -CREATE_INDEX true -USE_JDK_DEFLATER true -USE_JDK_INFLATER true  
+		rm -rf {output.bam}.bai 
+		"""
+
+rule index:
+	input:
+		bam = "output/{dataset}/bwameth_results/bam_rmdup/{sample_id}.deduplicated.bam"
+	output:
+		bam_idx = "output/{dataset}/bwameth_results/bam_rmdup/{sample_id}.deduplicated.bam.bai"
+	threads: 20
+	shell:
+		"""
+		samtools index -@ {threads} {input.bam}
+		"""
+
+rule cal_coverage:
+	input:
+		bam = "output/{dataset}/bwameth_results/bam_rmdup/{sample_id}.deduplicated.bam"
+	output:
+		covinfo = "output/{dataset}/align/genome/{sample_id}_cover_genome_covered.info"
+	threads: 20
+	log:
+		"output/{dataset}/log/bwameth_results/bam_rmdup/{sample_id}_cov.log"
+	shell:
+		"""
+		python3 tools/cal_coverd_genome.py -file1 {input.bam} -outname_prx output/{wildcards.dataset}/bwameth_results/bam_rmdup/{wildcards.sample_id}_cover_genome
+		"""
+
+
+
+rule methyldackel:
+	input:
+		bam_idx = "output/{dataset}/bwameth_results/bam_rmdup/{sample_id}.deduplicated.bam.bai",
+		genome = expand("{genome}",genome=genome_dir),
+		bam_rmdup = "output/{dataset}/bwameth_results/bam_rmdup/{sample_id}.deduplicated.bam"
+	output:
+		bedgraph = "output/{dataset}/bwameth_results/bam_rmdup/{sample_id}_CpG.bedGraph"
+	log:
+		"output/{dataset}/log/bwameth_results/methyldackel/{sample_id}.log"
+	threads: 20
+	shell:
+		"""
+		bash tools/methyldackel.sh output/{wildcards.dataset}/bwameth_results/bam_rmdup/ {wildcards.sample_id} {input.genome} {threads}
+		"""
+##################################### align to lambda ##########################33	
+#		
+rule bismark_lamda:
+	input:
+		lamda = expand("{lamda}",lamda=lamda_dir),
+		fastq1 = "output/{dataset}/trim/{sample_id}_1_val_1.fq.gz",
+		fastq2 = "output/{dataset}/trim/{sample_id}_2_val_2.fq.gz"
+	output:
+		bam = "output/{dataset}/bismark_results_lamda/{sample_id}.bam"
+	log:
+		"output/{dataset}/log/bismark_results_lamda/{sample_id}.log"
+	threads: 20
+	shell:
+		"""
+		bismark --bowtie2 -p {threads} -N 1 -L 30 {input.lamda} -q -1 {input.fastq1} -2 {input.fastq2} -o output/{wildcards.dataset}/bismark_results_lamda/ > {log} 2>&1
+		mv output/{wildcards.dataset}/bismark_results_lamda/{wildcards.sample_id}_1_val_1_bismark_bt2_pe.bam {output.bam}
+		"""
