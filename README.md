@@ -4,7 +4,6 @@
 + Alignment via bwameth.py
 + Get CpG methylation via MethylDackel
 
-** Make sure all the corresponding softwares and packages have been installed!! **
 
 ## To Use
 
@@ -14,7 +13,7 @@
 
 + Mkdir the `sample_id` directory, and use the following code to prepare the sample name file.
 ```shell
-ls -1 *.fq.gz | cut -d '_' -f 1-2 | awk '!a[$0]++' $@ > ../../sample_id/dataset.txt
+ls -1 *.fq.gz | cut -d '_' -f 1-2 | awk '!a[$0]++' > ../../sample_id/dataset.txt
 ```
 + Mkdir the `cluster` and `cluster_log` directories, where the returned information from snakemake will be put here.
 
